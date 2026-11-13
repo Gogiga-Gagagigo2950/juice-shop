@@ -3,7 +3,8 @@
 #   1. secret scanning  -> Gitleaks
 #   2. SAST             -> Semgrep
 #   3. SCA              -> OSV-Scanner
-#   4. DAST             -> ZAP (baseline scan) contro l'applicazione in esecuzione
+#   4. DAST             -> ZAP contro l'applicazione in esecuzione:
+#                          baseline (passiva) e full scan (attiva)
 # Ogni job fallisce se trova problemi e salva il proprio report come artefatto scaricabile.
 
 name: DevSecOps
@@ -178,9 +179,77 @@ jobs:
               -J zap-report.json \
               -r zap-report.html
 
+      - name: Riepilogo
+        if: always()
+        run: |
+          {
+            echo "## ZAP baseline: avvisi per livello di rischio"
+            echo "| Rischio | Avviso | CWE | Occorrenze |"
+            echo "|---|---|---|---|"
+            jq -r '.site[].alerts[] | "| \(.riskdesc) | \(.alert) | CWE-\(.cweid) | \(.count) |"' zap/zap-report.json | sort -r
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Salva il report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zap-report
           path: zap/
+
+  # Scansione attiva: a differenza della baseline, ZAP invia richieste di attacco
+  # (es. SQL Injection, XSS) ai punti di ingresso scoperti dagli spider.
+  dast-full:
+    name: DAST (ZAP full scan)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Installa e avvia Juice Shop
+        env:
+          CYPRESS_INSTALL_BINARY: 0
+        run: |
+          npm install
+          nohup npm start > juice-shop.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000 > /dev/null && echo "Juice Shop avviato" && exit 0
+            sleep 5
+          done
+          echo "Juice Shop non si è avviato" && cat juice-shop.log && exit 1
+
+      - name: ZAP full scan
+        run: |
+          mkdir -p zap-full && chmod 777 zap-full
+          docker run --rm --network host -v "$PWD/zap-full:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.17.0 \
+            zap-full-scan.py \
+              -t http://localhost:3000 \
+              -j \
+              -m 5 \
+              -z "-config scanner.maxScanDurationInMins=60" \
+              -J zap-full-report.json \
+              -r zap-full-report.html
+
+      - name: Riepilogo
+        if: always()
+        run: |
+          {
+            echo "## ZAP full scan: avvisi per livello di rischio"
+            echo "| Rischio | Avviso | CWE | Occorrenze |"
+            echo "|---|---|---|---|"
+            jq -r '.site[].alerts[] | "| \(.riskdesc) | \(.alert) | CWE-\(.cweid) | \(.count) |"' zap-full/zap-full-report.json | sort -r
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Salva il report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-full-report
+          path: zap-full/
