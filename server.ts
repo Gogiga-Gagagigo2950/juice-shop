@@ -743,7 +743,8 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
   // messaggio originale e stack trace. Il dettaglio resta solo nel log del server,
   // mentre il client riceve una risposta generica con il codice di stato appropriato.
   app.use((error: any, req: Request, res: Response, next: NextFunction) => {
-    const status = Number(error?.status ?? error?.statusCode)
+    // codice di stato: quello dell'errore, oppure quello già impostato dalla route (es. 403), altrimenti 500
+    const status = Number(error?.status ?? error?.statusCode) || res.statusCode
     const code = status >= 400 && status < 600 ? status : 500
     logger.error(`${req.method} ${req.originalUrl} -> ${code}: ${error?.message ?? error}`)
     if (res.headersSent) {
