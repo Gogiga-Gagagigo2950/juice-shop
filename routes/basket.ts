@@ -17,6 +17,14 @@ export function retrieveBasket () {
     try {
       const id = req.params.id
       const basket = await BasketModel.findOne({ where: { id }, include: [{ model: ProductModel, paranoid: false, as: 'Products' }] })
+      // Correzione A01 (CWE-639): controllo di autorizzazione. Il token dice chi è
+      // l'utente (autenticazione); qui si verifica che il carrello richiesto gli
+      // appartenga (autorizzazione). In caso contrario l'accesso viene negato.
+      const requester = security.authenticatedUsers.from(req)
+      if (basket && basket.UserId !== requester?.data?.id) {
+        res.status(403).json({ status: 'error', error: 'Access to this basket is not allowed' })
+        return
+      }
       /* jshint eqeqeq:false */
       challengeUtils.solveIf(challenges.basketAccessChallenge, () => {
         const user = security.authenticatedUsers.from(req)
