@@ -718,8 +718,19 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
   app.use(utils.asyncHandler(serveAngularClient()))
 
   /* Error Handling */
-  app.use(verify.errorHandlingChallenge())
-  app.use(errorhandler())
+  // Correzione A10 (CWE-209): gli errori non vengono più mostrati al client con
+  // messaggio originale e stack trace. Il dettaglio resta solo nel log del server,
+  // mentre il client riceve una risposta generica con il codice di stato appropriato.
+  app.use((error: any, req: Request, res: Response, next: NextFunction) => {
+    const status = Number(error?.status ?? error?.statusCode)
+    const code = status >= 400 && status < 600 ? status : 500
+    logger.error(`${req.method} ${req.originalUrl} -> ${code}: ${error?.message ?? error}`)
+    if (res.headersSent) {
+      next(error)
+      return
+    }
+    res.status(code).json({ status: 'error', error: code < 500 ? 'The request could not be processed.' : 'An unexpected error occurred.' })
+  })
 }
 
 // Function called first to ensure that all the i18n files are reloaded successfully before other linked operations.
