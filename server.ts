@@ -187,6 +187,27 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
   /* Security middleware */
   app.use(helmet.noSniff())
   app.use(helmet.frameguard())
+  // Correzione A02 (CWE-693): intestazioni di sicurezza aggiuntive.
+  // Content Security Policy: il browser carica script, stili, immagini e font solo
+  // dalle origini elencate, limitando l'impatto di un eventuale Cross-Site Scripting.
+  app.use(helmet.contentSecurityPolicy({
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'data:', 'https://fonts.gstatic.com'],
+      imgSrc: ["'self'", 'data:', 'blob:', 'https:'],
+      mediaSrc: ["'self'"],
+      connectSrc: ["'self'", 'ws:', 'wss:'],
+      frameAncestors: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"]
+    }
+  }))
+  // Isola il contesto di navigazione della pagina da finestre di altre origini.
+  app.use(helmet.crossOriginOpenerPolicy())
   // app.use(helmet.xssFilter()); // = no protection from persisted XSS via RESTful API
   app.disable('x-powered-by')
   app.use(featurePolicy({
@@ -718,8 +739,20 @@ function configureApp (app: ReturnType<typeof express>, seq: typeof sequelize) {
   app.use(utils.asyncHandler(serveAngularClient()))
 
   /* Error Handling */
-  app.use(verify.errorHandlingChallenge())
-  app.use(errorhandler())
+  // Correzione A10 (CWE-209): gli errori non vengono più mostrati al client con
+  // messaggio originale e stack trace. Il dettaglio resta solo nel log del server,
+  // mentre il client riceve una risposta generica con il codice di stato appropriato.
+  app.use((error: any, req: Request, res: Response, next: NextFunction) => {
+    // codice di stato: quello dell'errore, oppure quello già impostato dalla route (es. 403), altrimenti 500
+    const status = Number(error?.status ?? error?.statusCode) || res.statusCode
+    const code = status >= 400 && status < 600 ? status : 500
+    logger.error(`${req.method} ${req.originalUrl} -> ${code}: ${error?.message ?? error}`)
+    if (res.headersSent) {
+      next(error)
+      return
+    }
+    res.status(code).json({ status: 'error', error: code < 500 ? 'The request could not be processed.' : 'An unexpected error occurred.' })
+  })
 }
 
 // Function called first to ensure that all the i18n files are reloaded successfully before other linked operations.

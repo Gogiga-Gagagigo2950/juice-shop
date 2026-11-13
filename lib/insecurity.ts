@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import crypto from 'node:crypto'
 import { type Request, type Response, type NextFunction } from 'express'
 import { type UserModel } from '@juice-shop/models/user'
-import expressJwt from 'express-jwt'
+import { expressjwt } from 'express-jwt'
 import jwt from 'jsonwebtoken'
 import jws from 'jws'
 import sanitizeHtmlLib from 'sanitize-html'
@@ -17,8 +17,18 @@ import * as utils from './utils'
 // @ts-expect-error FIXME no typescript definitions for z85 :(
 import * as z85 from 'z85'
 
-export const publicKey = fs ? fs.readFileSync('encryptionkeys/jwt.pub', 'utf8') : 'placeholder-public-key'
-const privateKey = '-----BEGIN RSA PRIVATE KEY-----\r\nMIICXAIBAAKBgQDNwqLEe9wgTXCbC7+RPdDbBbeqjdbs4kOPOIGzqLpXvJXlxxW8iMz0EaM4BKUqYsIa+ndv3NAn2RxCd5ubVdJJcX43zO6Ko0TFEZx/65gY3BE0O6syCEmUP4qbSd6exou/F+WTISzbQ5FBVPVmhnYhG/kpwt/cIxK5iUn5hm+4tQIDAQABAoGBAI+8xiPoOrA+KMnG/T4jJsG6TsHQcDHvJi7o1IKC/hnIXha0atTX5AUkRRce95qSfvKFweXdJXSQ0JMGJyfuXgU6dI0TcseFRfewXAa/ssxAC+iUVR6KUMh1PE2wXLitfeI6JLvVtrBYswm2I7CtY0q8n5AGimHWVXJPLfGV7m0BAkEA+fqFt2LXbLtyg6wZyxMA/cnmt5Nt3U2dAu77MzFJvibANUNHE4HPLZxjGNXN+a6m0K6TD4kDdh5HfUYLWWRBYQJBANK3carmulBwqzcDBjsJ0YrIONBpCAsXxk8idXb8jL9aNIg15Wumm2enqqObahDHB5jnGOLmbasizvSVqypfM9UCQCQl8xIqy+YgURXzXCN+kwUgHinrutZms87Jyi+D8Br8NY0+Nlf+zHvXAomD2W5CsEK7C+8SLBr3k/TsnRWHJuECQHFE9RA2OP8WoaLPuGCyFXaxzICThSRZYluVnWkZtxsBhW2W8z1b8PvWUE7kMy7TnkzeJS2LSnaNHoyxi7IaPQUCQCwWU4U+v4lD7uYBw00Ga/xt+7+UqFPlPVdz1yyr4q24Zxaw0LgmuEvgU5dycq8N7JxjTubX0MIRR+G9fmDBBl8=\r\n-----END RSA PRIVATE KEY-----'
+// Correzione A07 (CWE-798): la chiave privata con cui vengono firmati i token non è più
+// scritta nel codice sorgente. Viene letta dall'ambiente di esecuzione (variabile
+// JWT_PRIVATE_KEY o file indicato da JWT_PRIVATE_KEY_FILE, entrambi fuori dal repository);
+// in loro assenza viene generata una chiave temporanea all'avvio del server.
+// La chiave pubblica di verifica è ricavata dalla chiave privata.
+const loadPrivateKey = (): string => {
+  if (process.env.JWT_PRIVATE_KEY) return process.env.JWT_PRIVATE_KEY.replace(/\\n/g, '\n')
+  if (process.env.JWT_PRIVATE_KEY_FILE) return fs.readFileSync(process.env.JWT_PRIVATE_KEY_FILE, 'utf8')
+  return crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey.export({ type: 'pkcs1', format: 'pem' }).toString()
+}
+const privateKey = loadPrivateKey()
+export const publicKey = crypto.createPublicKey(privateKey).export({ type: 'spki', format: 'pem' }).toString()
 
 interface ResponseWithUser {
   status?: string
@@ -39,6 +49,24 @@ interface IAuthenticatedUsers {
 }
 
 export const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')
+
+// Correzione A04 (CWE-328): le password non sono più memorizzate come hash MD5, una
+// funzione veloce e senza sale, ma con scrypt, una funzione di derivazione della chiave
+// progettata per le password: lenta da calcolare e con un sale casuale per ogni utente.
+// Formato memorizzato: "scrypt$<sale>$<hash>".
+export const hashPassword = (password: string) => {
+  const salt = crypto.randomBytes(16).toString('hex')
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex')
+  return `scrypt$${salt}$${derived}`
+}
+
+export const verifyPassword = (password: string, stored?: string) => {
+  const [algorithm, salt, derived] = (stored ?? '').split('$')
+  if (algorithm !== 'scrypt' || !salt || !derived) return false
+  const expected = Buffer.from(derived, 'hex')
+  const actual = crypto.scryptSync(password ?? '', salt, expected.length)
+  return crypto.timingSafeEqual(actual, expected)
+}
 export const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')
 
 export const cutOffPoisonNullByte = (str: string) => {
@@ -49,10 +77,19 @@ export const cutOffPoisonNullByte = (str: string) => {
   return str
 }
 
-export const isAuthorized = () => expressJwt(({ secret: publicKey }) as any)
-export const denyAll = () => expressJwt({ secret: '' + Math.random() } as any)
+// Correzione A03: express-jwt 8 richiede di dichiarare esplicitamente gli algoritmi ammessi,
+// impedendo token non firmati o firmati con un algoritmo diverso da quello previsto.
+export const isAuthorized = () => expressjwt({ secret: publicKey, algorithms: ['RS256'] })
+export const denyAll = () => expressjwt({ secret: '' + Math.random(), algorithms: ['HS256'] })
 export const authorize = (user = {}) => jwt.sign(user, privateKey, { expiresIn: '6h', algorithm: 'RS256' })
-export const verify = (token: string) => token ? (jws.verify as ((token: string, secret: string) => boolean))(token, publicKey) : false
+export const verify = (token: string) => {
+  if (!token) return false
+  try {
+    return jws.verify(token, 'RS256', publicKey)
+  } catch {
+    return false
+  }
+}
 export const decode = (token: string) => { return jws.decode(token)?.payload }
 
 export const sanitizeHtml = (html: string) => sanitizeHtmlLib(html)
