@@ -31,7 +31,11 @@ export function login () {
 
   return (req: Request, res: Response, next: NextFunction) => {
     verifyPreLoginChallenges(req) // vuln-code-snippet hide-line
-    models.sequelize.query(`SELECT * FROM Users WHERE email = '${req.body.email || ''}' AND password = '${security.hash(req.body.password || '')}' AND deletedAt IS NULL`, { model: UserModel, plain: true }) // vuln-code-snippet vuln-line loginAdminChallenge loginBenderChallenge loginJimChallenge
+    // Correzione A05 (CWE-89): query parametrizzata. La struttura della query è fissata
+    // e i valori dell'utente vengono passati separatamente tramite "bind" ($1, $2):
+    // il database li tratta sempre come dati, mai come parte del comando SQL.
+    models.sequelize.query('SELECT * FROM Users WHERE email = $1 AND password = $2 AND deletedAt IS NULL', // vuln-code-snippet vuln-line loginAdminChallenge loginBenderChallenge loginJimChallenge
+      { bind: [req.body.email || '', security.hash(req.body.password || '')], model: UserModel, plain: true })
       .then((authenticatedUser) => { // vuln-code-snippet neutral-line loginAdminChallenge loginBenderChallenge loginJimChallenge
         const user = utils.queryResultToJson(authenticatedUser)
         if (user.data?.id && user.data.totpSecret !== '') {
