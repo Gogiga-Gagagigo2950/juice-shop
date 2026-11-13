@@ -38,6 +38,16 @@ jobs:
             --report-format json \
             --report-path /repo/gitleaks-report.json
 
+      - name: Riepilogo
+        if: always()
+        run: |
+          {
+            echo "## Gitleaks: $(jq length gitleaks-report.json) segreti trovati"
+            echo "| Regola | File | Riga |"
+            echo "|---|---|---|"
+            jq -r '.[] | "| \(.RuleID) | \(.File | sub("^/repo/"; "")) | \(.StartLine) |"' gitleaks-report.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Salva il report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -65,6 +75,16 @@ jobs:
               --metrics off \
               --json --output semgrep-report.json \
               --error
+
+      - name: Riepilogo
+        if: always()
+        run: |
+          {
+            echo "## Semgrep: $(jq '.results | length' semgrep-report.json) risultati"
+            echo "| Regola | File | Riga | Gravità | CWE |"
+            echo "|---|---|---|---|---|"
+            jq -r '.results[] | "| \(.check_id | split(".") | last) | \(.path) | \(.start.line) | \(.extra.severity) | \((.extra.metadata.cwe // []) | if type=="array" then join(", ") else . end) |"' semgrep-report.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Salva il report
         if: always()
@@ -103,6 +123,16 @@ jobs:
               --lockfile /src/frontend/package-lock.json \
               --format json \
               --output-file /src/osv-report.json
+
+      - name: Riepilogo
+        if: always()
+        run: |
+          {
+            echo "## OSV-Scanner: $(jq '[.results[].packages[]] | length' osv-report.json) pacchetti vulnerabili, $(jq '[.results[].packages[].vulnerabilities[]] | length' osv-report.json) vulnerabilità"
+            echo "| Lockfile | Pacchetto | Versione | Gravità massima | Vulnerabilità |"
+            echo "|---|---|---|---|---|"
+            jq -r '.results[] | (.source.path | sub("^/src/"; "")) as $f | .packages[] | "| \($f) | \(.package.name) | \(.package.version) | \([.groups[]?.max_severity | select(. != "") | tonumber] | max // "n.d.") | \([.vulnerabilities[].id] | join(" ")) |"' osv-report.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Salva il report
         if: always()
