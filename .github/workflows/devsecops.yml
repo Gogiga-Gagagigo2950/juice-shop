@@ -1,0 +1,156 @@
+# Pipeline DevSecOps del caso di studio (tesi di laurea).
+# Quattro controlli automatici indipendenti, eseguiti a ogni push e a ogni pull request verso master:
+#   1. secret scanning  -> Gitleaks
+#   2. SAST             -> Semgrep
+#   3. SCA              -> OSV-Scanner
+#   4. DAST             -> ZAP (baseline scan) contro l'applicazione in esecuzione
+# Ogni job fallisce se trova problemi e salva il proprio report come artefatto scaricabile.
+
+name: DevSecOps
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+# Privilegio minimo: il token della pipeline può solo leggere il codice.
+permissions:
+  contents: read
+
+jobs:
+  secret-scanning:
+    name: Secret scanning (Gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            dir /repo \
+            --redact \
+            --report-format json \
+            --report-path /repo/gitleaks-report.json
+
+      - name: Salva il report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gitleaks-report
+          path: gitleaks-report.json
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Semgrep
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src semgrep/semgrep:1.185.0 \
+            semgrep scan \
+              --config p/owasp-top-ten \
+              --config p/javascript \
+              --config p/typescript \
+              --metrics off \
+              --json --output semgrep-report.json \
+              --error
+
+      - name: Salva il report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-report
+          path: semgrep-report.json
+
+  sca:
+    name: SCA (OSV-Scanner)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      # Juice Shop non versiona i lockfile: li generiamo per sapere quali versioni
+      # esatte delle dipendenze verrebbero installate, senza eseguire script.
+      - name: Genera i lockfile
+        run: |
+          npm install --package-lock-only --ignore-scripts --package-lock=true
+          cd frontend && npm install --package-lock-only --ignore-scripts --package-lock=true
+
+      - name: OSV-Scanner
+        run: |
+          docker run --rm -v "$PWD:/src" ghcr.io/google/osv-scanner:v2.7.1 \
+            scan source \
+              --lockfile /src/package-lock.json \
+              --lockfile /src/frontend/package-lock.json \
+              --format json \
+              --output-file /src/osv-report.json
+
+      - name: Salva il report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: osv-report
+          path: osv-report.json
+
+  dast:
+    name: DAST (ZAP baseline)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout del codice
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Installa e avvia Juice Shop
+        env:
+          CYPRESS_INSTALL_BINARY: 0
+        run: |
+          npm install
+          nohup npm start > juice-shop.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:3000 > /dev/null && echo "Juice Shop avviato" && exit 0
+            sleep 5
+          done
+          echo "Juice Shop non si è avviato" && cat juice-shop.log && exit 1
+
+      - name: ZAP baseline scan
+        run: |
+          mkdir -p zap && chmod 777 zap
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" ghcr.io/zaproxy/zaproxy:2.17.0 \
+            zap-baseline.py \
+              -t http://localhost:3000 \
+              -j \
+              -J zap-report.json \
+              -r zap-report.html
+
+      - name: Salva il report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: zap-report
+          path: zap/
