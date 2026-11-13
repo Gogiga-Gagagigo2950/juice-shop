@@ -49,6 +49,24 @@ interface IAuthenticatedUsers {
 }
 
 export const hash = (data: string) => crypto.createHash('md5').update(data).digest('hex')
+
+// Correzione A04 (CWE-328): le password non sono più memorizzate come hash MD5, una
+// funzione veloce e senza sale, ma con scrypt, una funzione di derivazione della chiave
+// progettata per le password: lenta da calcolare e con un sale casuale per ogni utente.
+// Formato memorizzato: "scrypt$<sale>$<hash>".
+export const hashPassword = (password: string) => {
+  const salt = crypto.randomBytes(16).toString('hex')
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex')
+  return `scrypt$${salt}$${derived}`
+}
+
+export const verifyPassword = (password: string, stored?: string) => {
+  const [algorithm, salt, derived] = (stored ?? '').split('$')
+  if (algorithm !== 'scrypt' || !salt || !derived) return false
+  const expected = Buffer.from(derived, 'hex')
+  const actual = crypto.scryptSync(password ?? '', salt, expected.length)
+  return crypto.timingSafeEqual(actual, expected)
+}
 export const hmac = (data: string) => crypto.createHmac('sha256', 'pa4qacea4VK9t9nGv7yZtwmj').update(data).digest('hex')
 
 export const cutOffPoisonNullByte = (str: string) => {
